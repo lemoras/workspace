@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  nginx:
+    image: nginx:latest
+    container_name: lemoras-nginx
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - ui
+      - gateway
+    networks:
+      - lemoras-net
+
+  ui:
+    build: ./lemoras-ui
+    container_name: lemoras-ui
+    # Apache server dinleyecek (Dockerfile içinde `EXPOSE 80` olmalı)
+    networks:
+      - lemoras-net
+
+  gateway:
+    build: ./lemoras-gateway
+    container_name: lemoras-gateway
+    ports:
+      - "8080"  # internal
+    depends_on:
+      - core
+      - modules
+    networks:
+      - lemoras-net
+
+  core:
+    build: ./lemoras-core
+    container_name: lemoras-core
+    expose:
+      - "8080"
+    networks:
+      - lemoras-net
+
+  modules:
+    build: ./lemoras-modules
+    container_name: lemoras-modules
+    expose:
+      - "8080"
+    networks:
+      - lemoras-net
+
+networks:
+  lemoras-net:
+    driver: bridge

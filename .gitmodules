@@ -1,0 +1,12 @@
+[submodule "lemoras-core"]
+	path = lemoras-core
+	url = git@github.com:lemoras/lemoras-core.git
+[submodule "lemoras-modules"]
+	path = lemoras-modules
+	url = git@github.com:lemoras/lemoras-modules.git
+[submodule "lemoras-ui"]
+	path = lemoras-ui
+	url = git@github.com:lemoras/lemoras-ui.git
+[submodule "lemoras-gateway"]
+	path = lemoras-gateway
+	url = git@github.com:lemoras/lemoras-gateway.git
