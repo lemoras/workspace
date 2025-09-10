@@ -1,0 +1,15 @@
+FROM nginx:latest
+
+# netcat-openbsd yükle
+RUN apt-get update && \
+    apt-get install -y netcat-openbsd && \
+    rm -rf /var/lib/apt/lists/*
+
+# config dosyalarını kopyala
+COPY ./default.conf /etc/nginx/conf.d/dev.conf
+COPY ./entrypoint.sh /entrypoint.sh
+COPY ./wait-for-it.sh /wait-for-it.sh
+
+RUN chmod +x /entrypoint.sh /wait-for-it.sh
+
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
