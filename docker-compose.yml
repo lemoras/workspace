@@ -50,6 +50,7 @@ services:
       - ./.env
     environment:
       DATABASE_URL: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
+      database_url: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
       JWT_ISSUER: demo.com
       ROOT_ACCOUNT: demo@demo.com
       TOKEN_SECRET_KEY: demotokenkeysecret
@@ -74,6 +75,7 @@ services:
       - ./.env
     environment:
       DATABASE_URL: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
+      database_url: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
       JWT_ISSUER: demo.com
       ROOT_ACCOUNT: demo@demo.com
       TOKEN_SECRET_KEY: demotokenkeysecret
