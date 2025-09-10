@@ -50,7 +50,7 @@ services:
       - ./.env
     environment:
       DATABASE_URL: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
-      JWT_ISSUER: security.lemoras.com
+      JWT_ISSUER: demo.com
       ROOT_ACCOUNT: demo@demo.com
       TOKEN_SECRET_KEY: demotokenkeysecret
       TOKEN_ROOT_SECRET_KEY: demotokenrootsecretkey
