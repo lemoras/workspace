@@ -23,6 +23,10 @@ services:
       - core
       - modules
       - lemoras-db
+    # volumes:
+    #   - ./app:/app
+    #   - ./certs:/app/.certcache
+    #   - ./env:/app/.env
     environment:
       PORT: 80
       MAIN_DOMAIN: dev.local
@@ -31,6 +35,9 @@ services:
       SERVICE_TARGET_URL: http://lemoras-modules
       FILE_TARGET_URL: http://file.dev.local
       RATE_SECRET_KEY: your-very-secure-random-secret
+      # ENABLE_HTTPS: true
+      # MAIN_DOMAIN: dev.local
+      # LETSENCRYPT_CACHE: /app/.certcache
     networks:
       - lemoras-net
 
