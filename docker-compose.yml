@@ -30,7 +30,7 @@ services:
       SYSTEM_TARGET_URL: http://lemoras-core
       SERVICE_TARGET_URL: http://lemoras-modules
       FILE_TARGET_URL: http://file.dev.local
-      SECRET_KEY: your-very-secure-random-secret
+      RATE_SECRET_KEY: your-very-secure-random-secret
     networks:
       - lemoras-net
 
