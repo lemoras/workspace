@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>E2EE with Key Expiry (OpenPGP.js)</title>
+  <script src="https://unpkg.com/openpgp@latest/dist/openpgp.min.js"></script>
+</head>
+<body>
+  <h2>🔐 Uçtan Uca Şifreleme (20dk SessionKey Expiry)</h2>
+  <div>
+    <label>Parola:</label>
+    <input type="password" id="password">
+    <button onclick="login()">Giriş / Kayıt</button>
+  </div>
+
+  <div id="actions" style="display:none;">
+    <hr>
+    <textarea id="data" placeholder="Şifrelenecek veri"></textarea><br>
+    <button onclick="encryptData()">Veriyi Şifrele</button>
+    <p><strong>Şifreli Hali:</strong> <span id="encrypted"></span></p>
+    <hr>
+    <h3>Parola Değiştir</h3>
+    <input type="password" id="newpassword">
+    <button onclick="changePassword()">Parolayı Değiştir</button>
+  </div>
+
+  <script>
+    const SESSION_KEY_NAME = "sessionKeyStorage";
+    const SESSION_EXPIRY_MINUTES = 20;
+
+    let wrappedKey, passwordSalt;
+
+    // 🧠 KDF: Paroladan key türet
+    async function deriveKey(password, salt) {
+      const enc = new TextEncoder();
+      return await openpgp.crypto.hash.sha256(enc.encode(password + salt));
+    }
+
+    async function generateSessionKey() {
+      return openpgp.crypto.getRandomBytes(32);
+    }
+
+    async function wrapKey(sessionKey, derived) {
+      return openpgp.crypto.symmetric.encrypt({
+        data: sessionKey,
+        password: derived,
+        format: 'binary'
+      });
+    }
+
+    async function unwrapKey(wrapped, derived) {
+      const msg = await openpgp.readMessage({ binaryMessage: wrapped });
+      const { data } = await openpgp.decrypt({
+        message: msg,
+        passwords: [derived],
+        format: 'binary'
+      });
+      return data;
+    }
+
+    function simulateServerSend(obj) {
+      window.serverStore = JSON.parse(JSON.stringify(obj));
+    }
+
+    function simulateServerReceive() {
+      return window.serverStore;
+    }
+
+    // ✅ SessionKey’i localStorage’a kaydet (timestamp ile)
+    function storeSessionKeyToLocal(keyBytes) {
+      const base64Key = btoa(String.fromCharCode(...keyBytes));
+      const now = Date.now();
+      const payload = JSON.stringify({ key: base64Key, timestamp: now });
+      localStorage.setItem(SESSION_KEY_NAME, payload);
+    }
+
+    // ✅ localStorage’dan sessionKey çek
+    function getSessionKeyFromLocal() {
+      const item = localStorage.getItem(SESSION_KEY_NAME);
+      if (!item) return null;
+
+      const parsed = JSON.parse(item);
+      const ageMin = (Date.now() - parsed.timestamp) / (1000 * 60);
+
+      if (ageMin > SESSION_EXPIRY_MINUTES) {
+        console.warn("Session key expired!");
+        localStorage.removeItem(SESSION_KEY_NAME);
+        return null;
+      }
+
+      return Uint8Array.from(atob(parsed.key), c => c.charCodeAt(0));
+    }
+
+    function showUI() {
+      document.getElementById('actions').style.display = 'block';
+    }
+
+    async function login() {
+      const pwd = document.getElementById("password").value;
+
+      const existing = simulateServerReceive();
+      if (!existing) {
+        // Yeni kullanıcı
+        passwordSalt = btoa(String.fromCharCode(...openpgp.crypto.getRandomBytes(16)));
+        const derived = await deriveKey(pwd, passwordSalt);
+        const sessionKey = await generateSessionKey();
+        wrappedKey = await wrapKey(sessionKey, derived);
+
+        simulateServerSend({ wrappedKey: btoa(String.fromCharCode(...wrappedKey)), salt: passwordSalt });
+        storeSessionKeyToLocal(sessionKey);
+        alert("🆕 Yeni kullanıcı kaydı yapıldı!");
+        showUI();
+        return;
+      }
+
+      // Mevcut kullanıcı
+      passwordSalt = existing.salt;
+      wrappedKey = Uint8Array.from(atob(existing.wrappedKey), c => c.charCodeAt(0));
+      const derived = await deriveKey(pwd, passwordSalt);
+
+      try {
+        const sessionKey = await unwrapKey(wrappedKey, derived);
+        storeSessionKeyToLocal(sessionKey);
+        alert("🔓 Başarıyla giriş yaptınız.");
+        showUI();
+      } catch (e) {
+        alert("❌ Şifre hatalı!");
+      }
+    }
+
+    async function encryptData() {
+      const sessionKey = getSessionKeyFromLocal();
+      if (!sessionKey) return alert("Session expired. Yeniden giriş yap.");
+
+      const msg = await openpgp.createMessage({ text: document.getElementById('data').value });
+      const encrypted = await openpgp.encrypt({
+        message: msg,
+        passwords: [sessionKey]
+      });
+      document.getElementById('encrypted').textContent = encrypted;
+    }
+
+    async function changePassword() {
+      const currentPwd = document.getElementById("password").value;
+      const newPwd = document.getElementById("newpassword").value;
+
+      const existing = simulateServerReceive();
+      const oldDerived = await deriveKey(currentPwd, existing.salt);
+      const sessionKey = await unwrapKey(Uint8Array.from(atob(existing.wrappedKey), c => c.charCodeAt(0)), oldDerived);
+
+      const newSalt = btoa(String.fromCharCode(...openpgp.crypto.getRandomBytes(16)));
+      const newDerived = await deriveKey(newPwd, newSalt);
+      const newWrapped = await wrapKey(sessionKey, newDerived);
+
+      wrappedKey = newWrapped;
+      passwordSalt = newSalt;
+
+      simulateServerSend({
+        wrappedKey: btoa(String.fromCharCode(...newWrapped)),
+        salt: newSalt
+      });
+
+      storeSessionKeyToLocal(sessionKey);
+      alert("✅ Parola başarıyla değiştirildi!");
+    }
+
+    // 🕒 Otomatik kontrol sayfa yüklenince
+    window.addEventListener("load", () => {
+      const existingKey = getSessionKeyFromLocal();
+      if (existingKey) {
+        console.log("✔ SessionKey bulundu (hala geçerli).");
+        showUI();
+      } else {
+        console.log("❗ SessionKey yok veya süresi dolmuş.");
+        localStorage.removeItem(SESSION_KEY_NAME);
+      }
+    });
+  </script>
+</body>
+</html>

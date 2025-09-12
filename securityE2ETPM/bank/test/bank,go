@@ -1,0 +1,188 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"log"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
+)
+
+type User struct {
+	ID          string
+	Credentials []webauthn.Credential
+}
+
+var usersMu sync.RWMutex
+var users = map[string]*User{}
+var wa *webauthn.WebAuthn
+
+type RateLimiter struct {
+	mu         sync.Mutex
+	timestamps map[string][]time.Time
+	limit      int
+	window     time.Duration
+}
+
+func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{timestamps: map[string][]time.Time{}, limit: limit, window: window}
+}
+func (rl *RateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	times := rl.timestamps[ip]
+	valid := []time.Time{}
+	for _, t := range times {
+		if now.Sub(t) <= rl.window {
+			valid = append(valid, t)
+		}
+	}
+	if len(valid) >= rl.limit {
+		return false
+	}
+	valid = append(valid, now)
+	rl.timestamps[ip] = valid
+	return true
+}
+
+var rateLimiter = NewRateLimiter(5, time.Minute)
+
+func getUser(id string) *User { usersMu.RLock(); defer usersMu.RUnlock(); return users[id] }
+func saveUser(u *User)        { usersMu.Lock(); defer usersMu.Unlock(); users[u.ID] = u }
+
+func registerChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	if !rateLimiter.Allow(r.RemoteAddr) {
+		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+		return
+	}
+	userID := r.URL.Query().Get("user")
+	if userID == "" {
+		http.Error(w, "user required", http.StatusBadRequest)
+		return
+	}
+	user := getUser(userID)
+	if user == nil {
+		user = &User{ID: userID}
+		saveUser(user)
+	}
+	options, sessionData, err := wa.BeginRegistration(user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sessionJSON, _ := json.Marshal(sessionData)
+	http.SetCookie(w, &http.Cookie{Name: "registerSession", Value: base64.StdEncoding.EncodeToString(sessionJSON), Path: "/"})
+	json.NewEncoder(w).Encode(options)
+}
+
+func registerResponseHandler(w http.ResponseWriter, r *http.Request) {
+	if !rateLimiter.Allow(r.RemoteAddr) {
+		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+		return
+	}
+	userID := r.URL.Query().Get("user")
+	user := getUser(userID)
+	if user == nil {
+		http.Error(w, "User not found", http.StatusBadRequest)
+		return
+	}
+	cookie, err := r.Cookie("registerSession")
+	if err != nil {
+		http.Error(w, "No session", http.StatusBadRequest)
+		return
+	}
+	sessionDataBytes, _ := base64.StdEncoding.DecodeString(cookie.Value)
+	var sessionData webauthn.SessionData
+	json.Unmarshal(sessionDataBytes, &sessionData)
+	var credential protocol.CredentialCreationResponse
+	if err := json.NewDecoder(r.Body).Decode(&credential); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	cred, err := wa.FinishRegistration(user, sessionData, credential)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	user.Credentials = append(user.Credentials, *cred)
+	saveUser(user)
+	w.Write([]byte("Registration successful"))
+}
+
+func loginChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	if !rateLimiter.Allow(r.RemoteAddr) {
+		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+		return
+	}
+	userID := r.URL.Query().Get("user")
+	user := getUser(userID)
+	if user == nil {
+		http.Error(w, "User not found", http.StatusBadRequest)
+		return
+	}
+	options, sessionData, err := wa.BeginLogin(user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sessionJSON, _ := json.Marshal(sessionData)
+	http.SetCookie(w, &http.Cookie{Name: "loginSession", Value: base64.StdEncoding.EncodeToString(sessionJSON), Path: "/"})
+	json.NewEncoder(w).Encode(options)
+}
+
+func loginResponseHandler(w http.ResponseWriter, r *http.Request) {
+	if !rateLimiter.Allow(r.RemoteAddr) {
+		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+		return
+	}
+	userID := r.URL.Query().Get("user")
+	user := getUser(userID)
+	if user == nil {
+		http.Error(w, "User not found", http.StatusBadRequest)
+		return
+	}
+	cookie, err := r.Cookie("loginSession")
+	if err != nil {
+		http.Error(w, "No session", http.StatusBadRequest)
+		return
+	}
+	sessionDataBytes, _ := base64.StdEncoding.DecodeString(cookie.Value)
+	var sessionData webauthn.SessionData
+	json.Unmarshal(sessionDataBytes, &sessionData)
+	var assertion protocol.CredentialAssertionResponse
+	if err := json.NewDecoder(r.Body).Decode(&assertion); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	_, err = wa.FinishLogin(user, sessionData, assertion)
+	if err != nil {
+		http.Error(w, "Login failed", http.StatusUnauthorized)
+		return
+	}
+	w.Write([]byte("Login successful"))
+}
+
+func main() {
+	var err error
+	wa, err = webauthn.New(&webauthn.Config{
+		RPDisplayName: "Demo Bank",
+		RPID:          "localhost",
+		RPOrigin:      "https://localhost:8443",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	http.HandleFunc("/webauthn/register-challenge", registerChallengeHandler)
+	http.HandleFunc("/webauthn/register-response", registerResponseHandler)
+	http.HandleFunc("/webauthn/login-challenge", loginChallengeHandler)
+	http.HandleFunc("/webauthn/login-response", loginResponseHandler)
+
+	log.Println("Server listening on :8443 (TLS required)")
+	log.Fatal(http.ListenAndServeTLS(":8443", "server.crt", "server.key", nil))
+}

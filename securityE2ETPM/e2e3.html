@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>Not Tutma Uygulaması - E2EE</title>
+</head>
+<body>
+  <h2>🔐 Güvenli Not Uygulaması (Uçtan Uca Şifreleme)</h2>
+
+  <div>
+    <label>Kullanıcı ID:</label>
+    <input type="text" id="userId"><br>
+    <label>Parola:</label>
+    <input type="password" id="password">
+    <button onclick="registerOrLogin()">Kayıt / Giriş</button>
+  </div>
+
+  <div id="recoveryDiv" style="display:none;">
+    <p>Recovery kodunu güvenli bir yere kaydet: <span id="recoveryCode"></span></p>
+  </div>
+
+  <div id="notesDiv" style="display:none;">
+    <hr>
+    <textarea id="note" placeholder="Şifrelenecek not"></textarea><br>
+    <button onclick="encryptAndSend()">Notu Şifrele & Gönder</button>
+    <p>Şifreli Not: <span id="encryptedNote"></span></p>
+    <hr>
+    <input type="password" id="newPassword" placeholder="Yeni Parola">
+    <button onclick="changePassword()">Parolayı Değiştir</button>
+  </div>
+
+  <script>
+    // --------------------------
+    // Helper Functions
+    // --------------------------
+    function bufToB64(buf){
+      return btoa(String.fromCharCode(...new Uint8Array(buf)));
+    }
+    function b64ToBuf(b64){
+      const bin = atob(b64);
+      const u = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
+      return u.buffer;
+    }
+    function randBytes(len){
+      const b = new Uint8Array(len);
+      crypto.getRandomValues(b);
+      return b.buffer;
+    }
+
+    // --------------------------
+    // Crypto Helpers
+    // --------------------------
+    async function deriveWrappingKey(password, saltBuf){
+      const enc = new TextEncoder();
+      const passKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
+      return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: saltBuf, iterations: 200000, hash: 'SHA-256' },
+        passKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt','decrypt']
+      );
+    }
+
+    async function aesGcmEncrypt(key, plainBuf){
+      const iv = randBytes(12);
+      const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plainBuf);
+      return { iv, ct };
+    }
+
+    async function aesGcmDecrypt(key, ivBuf, ctBuf){
+      return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf }, key, ctBuf);
+    }
+
+    async function generateDataKey(){
+      return await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt','decrypt']);
+    }
+
+    async function wrapDataKey(dataKey, wrappingKey){
+      const raw = await crypto.subtle.exportKey('raw', dataKey);
+      const { iv, ct } = await aesGcmEncrypt(wrappingKey, raw);
+      return { iv, ct };
+    }
+
+    async function unwrapDataKey(wrapped, wrappingKey){
+      const raw = await aesGcmDecrypt(wrappingKey, wrapped.iv, wrapped.ct);
+      return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt','decrypt']);
+    }
+
+    function genRecoveryCode(){
+      const rb = new Uint8Array(randBytes(32));
+      const b64 = btoa(String.fromCharCode(...rb)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+      return b64;
+    }
+
+    // --------------------------
+    // Global runtime key
+    // --------------------------
+    let _DATA_KEY = null;
+    let _WRAPPED_PASSWORD = null;
+    let _SALT_PASSWORD = null;
+    let _USER_ID = null;
+
+    // --------------------------
+    // Register/Login
+    // --------------------------
+    async function registerOrLogin(){
+      _USER_ID = document.getElementById('userId').value.trim();
+      const password = document.getElementById('password').value;
+      if(!_USER_ID || !password) return alert("Kullanıcı ID ve parola gerekli!");
+
+      // API: /api/getWrapped/{userId}  (GET) → var mı yok mu kontrol
+      const wrappedResp = await fetch(`/api/getWrapped/${_USER_ID}`);
+      if(wrappedResp.status === 404){
+        // Kullanıcı yok → Kayıt
+        const salt = randBytes(16);
+        const wrappingKey = await deriveWrappingKey(password, salt);
+        const dataKey = await generateDataKey();
+        const wrapped = await wrapDataKey(dataKey, wrappingKey);
+        const recoveryCode = genRecoveryCode();
+        const recSalt = randBytes(16);
+        const recWrappingKey = await deriveWrappingKey(recoveryCode, recSalt);
+        const wrappedRecovery = await wrapDataKey(dataKey, recWrappingKey);
+
+        // API: /api/register (POST)
+        await fetch('/api/register', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            userId:_USER_ID,
+            salt: bufToB64(salt),
+            wrapped: { iv: bufToB64(wrapped.iv), ct: bufToB64(wrapped.ct) },
+            recovery: { salt: bufToB64(recSalt), wrapped: { iv: bufToB64(wrappedRecovery.iv), ct: bufToB64(wrappedRecovery.ct) } }
+          })
+        });
+
+        _DATA_KEY = await crypto.subtle.importKey('raw', await crypto.subtle.exportKey('raw', dataKey), { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+        _WRAPPED_PASSWORD = wrapped;
+        _SALT_PASSWORD = salt;
+
+        document.getElementById('recoveryDiv').style.display='block';
+        document.getElementById('recoveryCode').textContent = recoveryCode;
+        document.getElementById('notesDiv').style.display='block';
+        alert("🆕 Kayıt tamamlandı!");
+      } else {
+        // Kullanıcı var → login
+        const json = await wrappedResp.json();
+        const salt = b64ToBuf(json.salt);
+        const wrapped = { iv: b64ToBuf(json.wrapped.iv), ct: b64ToBuf(json.wrapped.ct) };
+        const wrappingKey = await deriveWrappingKey(password, salt);
+        try{
+          _DATA_KEY = await unwrapDataKey(wrapped, wrappingKey);
+          _WRAPPED_PASSWORD = wrapped;
+          _SALT_PASSWORD = salt;
+          document.getElementById('notesDiv').style.display='block';
+          alert("🔓 Başarıyla giriş yaptınız!");
+        }catch(e){
+          alert("❌ Parola hatalı!");
+        }
+      }
+    }
+
+    // --------------------------
+    // Not Şifreleme & Gönderme
+    // --------------------------
+    async function encryptAndSend(){
+      if(!_DATA_KEY) return alert("Login yapmanız gerekir!");
+      const note = document.getElementById('note').value;
+      const enc = new TextEncoder();
+      const plainBuf = enc.encode(note);
+      const { iv, ct } = await aesGcmEncrypt(_DATA_KEY, plainBuf);
+
+      document.getElementById('encryptedNote').textContent = bufToB64(iv) + ":" + bufToB64(ct);
+
+      // API: /api/notes POST
+      await fetch('/api/notes', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          userId: _USER_ID,
+          note: bufToB64(iv)+":"+bufToB64(ct)
+        })
+      });
+      alert("✅ Not servera gönderildi (sunucu ciphertext saklar, plaintext görmez).");
+    }
+
+    // --------------------------
+    // Parola Değiştir
+    // --------------------------
+    async function changePassword(){
+      if(!_DATA_KEY) return alert("Login yapmanız gerekir!");
+      const newPwd = document.getElementById('newPassword').value;
+      if(!newPwd) return alert("Yeni parola boş olamaz!");
+      const newSalt = randBytes(16);
+      const newWrappingKey = await deriveWrappingKey(newPwd, newSalt);
+      const wrapped = await wrapDataKey(_DATA_KEY, newWrappingKey);
+
+      _WRAPPED_PASSWORD = wrapped;
+      _SALT_PASSWORD = newSalt;
+
+      // API: /api/changePassword POST
+      await fetch('/api/changePassword', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          userId: _USER_ID,
+          salt: bufToB64(newSalt),
+          wrapped: { iv: bufToB64(wrapped.iv), ct: bufToB64(wrapped.ct) }
+        })
+      });
+      alert("✅ Parola değiştirildi!");
+    }
+  </script>
+</body>
+</html>

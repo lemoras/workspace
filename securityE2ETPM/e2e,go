@@ -1,0 +1,98 @@
+package main
+
+import (
+    "encoding/base64"
+    "encoding/json"
+    "log"
+    "net/http"
+    "sync"
+    "time"
+)
+
+type WrappedData struct {
+    Salt    string `json:"salt"`
+    Wrapped struct {
+        IV string `json:"iv"`
+        CT string `json:"ct"`
+    } `json:"wrapped"`
+    Recovery struct {
+        Salt    string `json:"salt"`
+        Wrapped struct {
+            IV string `json:"iv"`
+            CT string `json:"ct"`
+        } `json:"wrapped"`
+    } `json:"recovery"`
+}
+
+var (
+    userStore = map[string]WrappedData{}
+    storeMu   = sync.RWMutex{}
+
+    // Simple in-memory rate limit
+    attempts   = map[string][]time.Time{}
+    attemptsMu = sync.Mutex{}
+    maxPerMin  = 5
+)
+
+func rateLimitMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ip := r.RemoteAddr
+        attemptsMu.Lock()
+        now := time.Now()
+        ts := attempts[ip]
+        filtered := []time.Time{}
+        for _, t := range ts {
+            if now.Sub(t) < time.Minute {
+                filtered = append(filtered, t)
+            }
+        }
+        if len(filtered) >= maxPerMin {
+            attemptsMu.Unlock()
+            http.Error(w, "Too many requests, try later", http.StatusTooManyRequests)
+            return
+        }
+        filtered = append(filtered, now)
+        attempts[ip] = filtered
+        attemptsMu.Unlock()
+        next.ServeHTTP(w, r)
+    })
+}
+
+// Register endpoint
+func registerHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != "POST" {
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        return
+    }
+    var data WrappedData
+    if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+    storeMu.Lock()
+    userStore[data.Salt] = data // burada Salt yerine userID kullanılabilir
+    storeMu.Unlock()
+    w.WriteHeader(http.StatusOK)
+}
+
+// Get Wrapped Key
+func getWrappedHandler(w http.ResponseWriter, r *http.Request) {
+    userId := r.URL.Path[len("/api/getWrapped/"):]
+    storeMu.RLock()
+    data, ok := userStore[userId]
+    storeMu.RUnlock()
+    if !ok {
+        http.NotFound(w, r)
+        return
+    }
+    json.NewEncoder(w).Encode(data)
+}
+
+func main() {
+    mux := http.NewServeMux()
+    mux.Handle("/api/register", rateLimitMiddleware(http.HandlerFunc(registerHandler)))
+    mux.Handle("/api/getWrapped/", rateLimitMiddleware(http.HandlerFunc(getWrappedHandler)))
+
+    log.Println("Server listening on :8080")
+    log.Fatal(http.ListenAndServe(":8080", mux))
+}

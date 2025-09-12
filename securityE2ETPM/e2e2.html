@@ -1,0 +1,277 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>E2EE Notes — WebCrypto (PBKDF2 + AES-GCM)</title>
+<style>body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px}textarea{width:100%;height:120px}</style>
+</head>
+<body>
+  <h2>🔐 Güvenli E2EE Not Uygulaması (WebCrypto)</h2>
+
+  <div id="auth">
+    <label>Parola: <input id="password" type="password"></label>
+    <button id="btnRegister">Kayıt</button>
+    <button id="btnLogin">Giriş</button>
+    <button id="btnLogout">Çıkış</button>
+  </div>
+
+  <div id="app" style="display:none;">
+    <p>Oturum açık — veriKey sessionStorage'da tutuluyor (ephemeral).</p>
+    <textarea id="note" placeholder="Notunu buraya yaz..."></textarea><br>
+    <button id="btnSave">Kaydet (Şifrele ve Sunucuya Gönder)</button>
+    <button id="btnLoad">Yükle ve Çöz</button>
+    <p><strong>Sunucuda saklanan şifreli blob:</strong></p>
+    <pre id="blob" style="white-space:pre-wrap;background:#f4f4f4;padding:8px"></pre>
+
+    <hr>
+    <h3>Parola Değiştir</h3>
+    <input id="newPassword" type="password" placeholder="Yeni parola">
+    <button id="btnChangePwd">Parolayı Değiştir</button>
+  </div>
+
+<script>
+/*
+  - Sunucu simülasyonu: window.serverStore = { salt: base64, wrappedKey: base64, note: {iv:base64, ct:base64} }
+  - Production: serverStore verileri gerçek backend DB'de saklanır; sunucu hiçbir zaman dataKey'i bilmemeli.
+*/
+
+// ---------- Helper (binary/base64) ----------
+function bufToBase64(buf){
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+function base64ToBuf(b64){
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr.buffer;
+}
+function randBytes(len){
+  const b = new Uint8Array(len);
+  crypto.getRandomValues(b);
+  return b.buffer;
+}
+
+// ---------- Crypto primitives ----------
+// PBKDF2 derive -> returns CryptoKey for AES-GCM usage (wrapKey)
+async function deriveWrappingKey(password, salt, iterations=200000){
+  const enc = new TextEncoder();
+  const passKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: salt, iterations: iterations, hash: 'SHA-256' },
+    passKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt','decrypt']
+  );
+}
+
+// Generate random symmetric dataKey (AES-GCM) — this is the key used to encrypt notes
+async function generateDataKey(){
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt','decrypt']);
+}
+
+// wrap dataKey by exporting raw and encrypting raw bytes with wrappingKey (AES-GCM)
+async function wrapDataKey(dataKey, wrappingKey){
+  // export raw dataKey
+  const raw = await crypto.subtle.exportKey('raw', dataKey); // ArrayBuffer
+  const iv = randBytes(12);
+  const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, wrappingKey, raw);
+  return { iv: iv, ct: cipher }; // both ArrayBuffer
+}
+
+// unwrap: decrypt cipher with wrappingKey then import raw into CryptoKey
+async function unwrapDataKey(wrapped, wrappingKey){
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: wrapped.iv }, wrappingKey, wrapped.ct);
+  return crypto.subtle.importKey('raw', plain, { name: 'AES-GCM', length: 256 }, true, ['encrypt','decrypt']);
+}
+
+// encrypt plainString with dataKey -> returns {iv, ct}
+async function encryptWithDataKey(dataKey, plainStr){
+  const iv = randBytes(12);
+  const enc = new TextEncoder();
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, dataKey, enc.encode(plainStr));
+  return { iv: iv, ct: ct };
+}
+
+// decrypt
+async function decryptWithDataKey(dataKey, iv, ct){
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, dataKey, ct);
+  return new TextDecoder().decode(plain);
+}
+
+// ---------- Server simulation ----------
+function serverSaveWrappedKey(salt_b64, wrapped_b64){
+  window.serverStore = window.serverStore || {};
+  window.serverStore.salt = salt_b64;
+  window.serverStore.wrappedKey = wrapped_b64;
+}
+function serverGetWrappedKey(){
+  return window.serverStore || null;
+}
+function serverSaveNote(noteObj){
+  window.serverStore = window.serverStore || {};
+  window.serverStore.note = noteObj; // { iv: b64, ct: b64 }
+}
+function serverGetNote(){ return (window.serverStore && window.serverStore.note) ? window.serverStore.note : null; }
+
+// ---------- Session (client) ----------
+const SESSION_KEY_NAME = 'e2ee_dataKey'; // store base64 raw key + timestamp
+const SESSION_TTL_MS = 20 * 60 * 1000; // 20 minutes
+
+async function setSessionDataKey(dataKey){
+  // export raw and store in sessionStorage with timestamp
+  const raw = await crypto.subtle.exportKey('raw', dataKey);
+  const payload = JSON.stringify({ key: bufToBase64(raw), ts: Date.now() });
+  sessionStorage.setItem(SESSION_KEY_NAME, payload);
+}
+async function getSessionDataKey(){
+  const raw = sessionStorage.getItem(SESSION_KEY_NAME);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Date.now() - parsed.ts > SESSION_TTL_MS){
+      sessionStorage.removeItem(SESSION_KEY_NAME);
+      return null;
+    }
+    const keyBuf = base64ToBuf(parsed.key);
+    return crypto.subtle.importKey('raw', keyBuf, { name: 'AES-GCM', length: 256 }, true, ['encrypt','decrypt']);
+  } catch (e){ console.error(e); return null; }
+}
+function clearSession(){ sessionStorage.removeItem(SESSION_KEY_NAME); }
+
+// ---------- Flows: Register, Login, Save Note, Load Note, Change Password ----------
+async function register(password){
+  // create salt
+  const salt = randBytes(16);
+  const wrappingKey = await deriveWrappingKey(password, salt);
+  const dataKey = await generateDataKey();
+  const wrapped = await wrapDataKey(dataKey, wrappingKey);
+  // store wrapped and salt on server (base64)
+  const salt_b64 = bufToBase64(salt);
+  const wrapped_b64 = JSON.stringify({ iv: bufToBase64(wrapped.iv), ct: bufToBase64(wrapped.ct) });
+  serverSaveWrappedKey(salt_b64, wrapped_b64);
+  // keep dataKey in session
+  await setSessionDataKey(dataKey);
+  renderUI();
+  alert('Kayıt tamamlandı. DataKey tarayıcıda oturumda tutuluyor.');
+}
+
+async function login(password){
+  const rec = serverGetWrappedKey();
+  if (!rec) return alert('Kullanıcı bulunamadı. Kayıt ol.');
+  const salt = base64ToBuf(rec.salt);
+  const wrapped = JSON.parse(rec.wrappedKey);
+  const wrappedObj = { iv: base64ToBuf(wrapped.iv), ct: base64ToBuf(wrapped.ct) };
+  const wrappingKey = await deriveWrappingKey(password, salt);
+  try {
+    const dataKey = await unwrapDataKey(wrappedObj, wrappingKey);
+    await setSessionDataKey(dataKey);
+    renderUI();
+    alert('Giriş başarılı.');
+  } catch (e){
+    console.error(e);
+    alert('Parola hatalı veya veri bozulmuş.');
+  }
+}
+
+async function saveNote(){
+  const dataKey = await getSessionDataKey();
+  if (!dataKey) return alert('Oturum yok veya süresi dolmuş. Tekrar giriş yap.');
+  const plain = document.getElementById('note').value;
+  const enc = await encryptWithDataKey(dataKey, plain);
+  const obj = { iv: bufToBase64(enc.iv), ct: bufToBase64(enc.ct) };
+  serverSaveNote(obj);
+  document.getElementById('blob').textContent = JSON.stringify(obj, null, 2);
+  alert('Not şifrelendi ve sunucuya gönderildi.');
+}
+
+async function loadNote(){
+  const rec = serverGetNote();
+  if (!rec) return alert('Sunucuda not yok.');
+  const dataKey = await getSessionDataKey();
+  if (!dataKey) return alert('Oturum yok veya süresi dolmuş.');
+  const iv = base64ToBuf(rec.iv);
+  const ct = base64ToBuf(rec.ct);
+  try {
+    const plain = await decryptWithDataKey(dataKey, iv, ct);
+    document.getElementById('note').value = plain;
+    alert('Not çözüldü.');
+  } catch (e){
+    console.error(e);
+    alert('Çözme hatası: anahtar yanlış veya veri bozulmuş.');
+  }
+}
+
+async function changePassword(oldPwd, newPwd){
+  // get wrapped+salt from server
+  const rec = serverGetWrappedKey();
+  if (!rec) return alert('Kayıtlı kullanıcı yok.');
+  const salt = base64ToBuf(rec.salt);
+  const wrapped = JSON.parse(rec.wrappedKey);
+  const wrappedObj = { iv: base64ToBuf(wrapped.iv), ct: base64ToBuf(wrapped.ct) };
+
+  // derive old, unwrap to get dataKey
+  const oldWrapping = await deriveWrappingKey(oldPwd, salt);
+  let dataKey;
+  try {
+    dataKey = await unwrapDataKey(wrappedObj, oldWrapping);
+  } catch (e){
+    return alert('Mevcut parola hatalı.');
+  }
+
+  // derive new wrapping key + wrap dataKey and save on server
+  const newSalt = randBytes(16);
+  const newWrapKey = await deriveWrappingKey(newPwd, newSalt);
+  const newWrapped = await wrapDataKey(dataKey, newWrapKey);
+  serverSaveWrappedKey(bufToBase64(newSalt), JSON.stringify({ iv: bufToBase64(newWrapped.iv), ct: bufToBase64(newWrapped.ct) }));
+  // update session (keep dataKey)
+  await setSessionDataKey(dataKey);
+  alert('Parola değiştirildi.');
+}
+
+// ---------- UI and handlers ----------
+function renderUI(){
+  const app = document.getElementById('app');
+  const auth = document.getElementById('auth');
+  getSessionDataKey().then(k=>{
+    if (k){
+      auth.style.display = 'none';
+      app.style.display = 'block';
+      const rec = serverGetWrappedKey();
+      document.getElementById('blob').textContent = rec && rec.note ? JSON.stringify(rec.note, null, 2) : '—';
+    } else {
+      auth.style.display = 'block';
+      app.style.display = 'none';
+    }
+  });
+}
+
+document.getElementById('btnRegister').addEventListener('click', async ()=>{
+  const pwd = document.getElementById('password').value;
+  if (!pwd) return alert('Parola gir.');
+  await register(pwd);
+});
+document.getElementById('btnLogin').addEventListener('click', async ()=>{
+  const pwd = document.getElementById('password').value;
+  if (!pwd) return alert('Parola gir.');
+  await login(pwd);
+});
+document.getElementById('btnLogout').addEventListener('click', ()=>{
+  clearSession();
+  renderUI();
+  alert('Çıkış yapıldı.');
+});
+document.getElementById('btnSave').addEventListener('click', saveNote);
+document.getElementById('btnLoad').addEventListener('click', loadNote);
+document.getElementById('btnChangePwd').addEventListener('click', async ()=>{
+  const cur = document.getElementById('password').value;
+  const nxt = document.getElementById('newPassword').value;
+  if (!cur || !nxt) return alert('Hem mevcut hem yeni parola gerekli.');
+  await changePassword(cur, nxt);
+  document.getElementById('password').value = nxt; // keep logged in as new pwd
+});
+
+window.addEventListener('load', renderUI);
+</script>
+</body>
+</html>

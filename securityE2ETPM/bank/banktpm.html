@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Bankacılık Seviyesinde Demo (WebAuthn)</title>
+</head>
+<body>
+<h2>🔐 Bankacılık Seviyesinde Güvenli Giriş Demo</h2>
+
+<div>
+  <label>Kullanıcı ID:</label>
+  <input type="text" id="userId"><br>
+  <button onclick="register()">Kayıt (Create Credential)</button>
+  <button onclick="login()">Giriş (Get Assertion)</button>
+</div>
+
+<div id="info" style="margin-top:20px;"></div>
+
+<script>
+const info = document.getElementById('info');
+
+// ----------------- Helper -----------------
+function b64ToBuf(b64){return Uint8Array.from(atob(b64),c=>c.charCodeAt(0));}
+function bufToB64(buf){return btoa(String.fromCharCode(...new Uint8Array(buf)));}
+
+// ----------------- Registration -----------------
+async function register(){
+  const userId = document.getElementById('userId').value.trim();
+  if(!userId) return alert("Kullanıcı ID gerekli!");
+
+  // Server’dan challenge al
+  const resp = await fetch(`/webauthn/register-challenge?user=${userId}`);
+  const challengeData = await resp.json();
+
+  // Challenge verilerini array buffer’a çevir
+  challengeData.challenge = b64ToBuf(challengeData.challenge);
+  challengeData.user.id = b64ToBuf(challengeData.user.id);
+
+  // Credential oluştur
+  try{
+    const credential = await navigator.credentials.create({publicKey: challengeData});
+    // Attestation gönder
+    const attestationResponse = {
+      id: credential.id,
+      rawId: bufToB64(credential.rawId),
+      type: credential.type,
+      response: {
+        clientDataJSON: bufToB64(credential.response.clientDataJSON),
+        attestationObject: bufToB64(credential.response.attestationObject)
+      }
+    };
+    await fetch(`/webauthn/register-response?user=${userId}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(attestationResponse)
+    });
+    info.innerText="✅ Kayıt başarılı! Artık giriş yapabilirsiniz.";
+  }catch(e){
+    console.error(e);
+    alert("Kayıt başarısız: "+e);
+  }
+}
+
+// ----------------- Login -----------------
+async function login(){
+  const userId = document.getElementById('userId').value.trim();
+  if(!userId) return alert("Kullanıcı ID gerekli!");
+
+  const resp = await fetch(`/webauthn/login-challenge?user=${userId}`);
+  const challengeData = await resp.json();
+
+  // challenge ve allowedCredentials arraybuffer
+  challengeData.challenge = b64ToBuf(challengeData.challenge);
+  challengeData.allowCredentials = challengeData.allowCredentials.map(c=>{
+    return {...c, id:b64ToBuf(c.id)};
+  });
+
+  try{
+    const assertion = await navigator.credentials.get({publicKey: challengeData});
+    const assertionResponse = {
+      id: assertion.id,
+      rawId: bufToB64(assertion.rawId),
+      type: assertion.type,
+      response: {
+        clientDataJSON: bufToB64(assertion.response.clientDataJSON),
+        authenticatorData: bufToB64(assertion.response.authenticatorData),
+        signature: bufToB64(assertion.response.signature),
+        userHandle: assertion.response.userHandle ? bufToB64(assertion.response.userHandle) : null
+      }
+    };
+
+    await fetch(`/webauthn/login-response?user=${userId}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(assertionResponse)
+    });
+
+    info.innerText="🔓 Başarıyla giriş yaptınız! Artık banka seviyesinde güvenli key kullanabilirsiniz.";
+  }catch(e){
+    console.error(e);
+    alert("Giriş başarısız: "+e);
+  }
+}
+</script>
+</body>
+</html>
