@@ -78,12 +78,8 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
       database_url: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
-      JWT_ISSUER: demo.com
-      ROOT_ACCOUNT: demo@demo.com
-      TOKEN_SECRET_KEY: demotokenkeysecret
-      TOKEN_ROOT_SECRET_KEY: demotokenrootsecretkey
-      TICKET_SECRET_KEY: demoticketsecretkey
-      RATE_SECRET_KEY: demoratesecretkey
+      TICKET_API_URL: dev.local/security/ticket
+      VALID_API_URL: dev.local/security/validation
       X_API_KEY: XAPI-SecretKey
       COOKIE_ALLOWED_DOMAINS: dev.local,lemoras.com
       IS_HTTP_ONLY_AUTH_COOKIE: "true"
