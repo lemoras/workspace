@@ -69,8 +69,8 @@ services:
   modules:
     build: ./lemoras-modules
     container_name: lemoras-modules
-    expose:
-      - "80"
+    ports:
+      - "8080:80"   # host:container
     depends_on:
       - lemoras-db
     env_file:
@@ -78,14 +78,16 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
       database_url: postgresql://postgres:mysecretpassword@lemoras-db:5432/zoe?sslmode=disable
-      TICKET_API_URL: dev.local/security/ticket
-      VALID_API_URL: dev.local/security/validation
+      TICKET_API_URL: http://lemoras-core/security/ticket
+      VALID_API_URL: http://lemoras-core/security/validation
       X_API_KEY: XAPI-SecretKey
       COOKIE_ALLOWED_DOMAINS: dev.local,lemoras.com
       IS_HTTP_ONLY_AUTH_COOKIE: "true"
       IS_HTTP_SSL: "false"
     networks:
       - lemoras-net
+    extra_hosts:
+      - "worker.dev.local:host-gateway"
 
   lemoras-db:
     image: postgres:15
